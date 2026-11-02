@@ -1,0 +1,21 @@
+# 训练输出（默认在仓库内 runs/；服务器上建议用 S2D_RUNS 指到 /root/Test）
+runs/
+results/
+
+# 数据：通常是指向 /root/Test/data 的软链接，不入库
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 训练产物
+*.pth.tar
+*.log
+debug_sample.png
+
+# 编辑器
+.vscode/
+.idea/
