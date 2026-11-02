@@ -31,31 +31,6 @@ s2d_baseline/
 │   └── debug_sample.py       单样本数据自检
 └── tests/                    单元测试
 ```
-
-## 环境与数据
-
-环境与主仓库相同（conda env `s2d`，见大仓库的 `SETUP.md`）：
-
-- Python 3.11.13 / torch 2.5.1+cu121 / RTX 4090
-- `TORCH_HOME=/root/Test/hf_cache`（torchvision 只认这个变量）
-- 每个 h5 含 `rgb`（CHW, uint8）和 `depth`（HW, float32, 米, 0 = 无效）
-
-**数据不在本仓库里。** 二选一：
-
-```bash
-# 方式 A：在仓库根目录建 data 软链接
-ln -s /root/Test/data data
-
-# 方式 B：用环境变量指定（优先级最高）
-export S2D_DATA_ROOT=/root/DZQ/CV/sparse-to-dense.pytorch-master/data/nyudepthv2
-```
-
-数据目录需要是：
-
-```
-<data-root>/{train,val}/<scene>/*.h5
-```
-
 ## 快速开始
 
 ```bash
@@ -268,15 +243,3 @@ PRETRAIN=0 bash train.sh
 # 续训
 RESUME=/root/Test/s2d_baseline_runs/<run>/last.pth.tar bash train.sh
 ```
-
-## 注意事项
-
-- **指标口径**：默认 `image`（每图 RMSE 再平均），与上游/Lua 的 0.2203/0.2146 可比；
-  `pixel` 是按像素累计，RMSE 通常更大。
-- **稀疏点**：严格 500（无放回），不是上游的概率采样（期望 500、实际波动）。
-- **续训**：`--resume` 会用 checkpoint 里的配置覆盖命令行参数；要改 epochs 等请重新训练。
-- **预训练权重**：`TORCH_HOME` 必须指向包含 `hub/checkpoints/resnet50-0676ba61.pth` 的目录，
-  否则会尝试联网下载甚至卡住。
-- **磁盘**：根盘 `/` 常年 99% 满，输出请放 `/root/Test`（`train.sh` 已默认）。
-- **与 `s2d_repro` 的区别**：本目录没有 A1–A4/B1–B2 改进、没有 `experiments/`、
-  没有消融结果与文献整理；那些都在大仓库的 `sparse-to-dense.pytorch-master/s2d_repro/`。
