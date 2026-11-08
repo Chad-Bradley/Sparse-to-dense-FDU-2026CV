@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -59,6 +60,9 @@ class Config:
     # 上游的瓶颈卷积是 1×1、2048→1024、后接 BN 且不加 ReLU。
     bottleneck_kernel: int = 1
     pretrained: bool = True
+    learned_upsample: bool = False
+    invalid_mode: str = "zero"  # zero | sentinel | mask | sparse
+    invalid_value: float = -1.0
 
     # --- 优化 ---
     epochs: int = 15
@@ -88,6 +92,23 @@ class Config:
         # JSON 反序列化会把 tuple 变成 list；统一转回 tuple，便于比较和传给模型。
         if not isinstance(self.output_size, tuple):
             self.output_size = tuple(self.output_size)
+        if self.invalid_mode not in ("zero", "sentinel", "mask", "sparse"):
+            raise ValueError("invalid_mode must be zero/sentinel/mask/sparse")
+        if self.invalid_mode != "zero" and self.modality == "rgb":
+            raise ValueError("invalid-point experiments require d or rgbd input")
+        if not self.invalid_value < 0 or not math.isfinite(self.invalid_value):
+            raise ValueError("invalid_value must be finite and negative")
+
+    def model_kwargs(self, pretrained=None):
+        """Shared train/evaluate/analyze construction, including old checkpoints."""
+        return dict(
+            in_channels={"rgb": 3, "d": 1, "rgbd": 4}[self.modality],
+            arch=self.arch, decoder=self.decoder, output_size=self.output_size,
+            pretrained=self.pretrained if pretrained is None else pretrained,
+            conv1_init=self.conv1_init, bottleneck_kernel=self.bottleneck_kernel,
+            learned_upsample=self.learned_upsample,
+            invalid_mode=self.invalid_mode, invalid_value=self.invalid_value,
+        )
 
     def to_dict(self) -> dict:
         """写进 checkpoint / config.json 的快照。"""

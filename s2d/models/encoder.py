@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import torch
 import torch.nn as nn
 import torchvision
 from torchvision.models import ResNet18_Weights, ResNet50_Weights

@@ -94,12 +94,7 @@ def main():
     loader = DataLoader(dataset, batch_size=1, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
-    model = SparseToDense(
-        in_channels=IN_CHANNELS[cfg.modality],
-        arch=cfg.arch, decoder=cfg.decoder,
-        output_size=cfg.output_size, pretrained=False,
-        conv1_init=cfg.conv1_init,
-        bottleneck_kernel=cfg.bottleneck_kernel).to(device)
+    model = SparseToDense(**cfg.model_kwargs(pretrained=False)).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

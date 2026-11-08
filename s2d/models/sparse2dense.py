@@ -16,9 +16,11 @@
 from __future__ import annotations
 
 import torch.nn as nn
+import torch.nn.functional as F
 
 from s2d.models.decoder import choose_decoder
 from s2d.models.encoder import ResNetEncoder, weights_init
+from s2d.models.invalid_points import InvalidPointAdapter
 
 
 class SparseToDense(nn.Module):
@@ -37,11 +39,14 @@ class SparseToDense(nn.Module):
 
     def __init__(self, in_channels=4, arch="resnet50", decoder="upproj",
                  output_size=(228, 304), pretrained=True,
-                 conv1_init="random", bottleneck_kernel=1):
+                 conv1_init="random", bottleneck_kernel=1,
+                 learned_upsample=False, invalid_mode="zero", invalid_value=-1.0):
         super().__init__()
         self.output_size = tuple(output_size)
+        self.input_adapter = InvalidPointAdapter(in_channels, invalid_mode, invalid_value)
+        self.learned_upsample = learned_upsample
         self.encoder = ResNetEncoder(
-            arch=arch, in_channels=in_channels,
+            arch=arch, in_channels=self.input_adapter.out_channels,
             pretrained=pretrained, conv1_init=conv1_init)
 
         # 上游 conv2：把主干通道压一半。ResNet50: 2048→1024，ResNet18: 512→256。
@@ -73,12 +78,25 @@ class SparseToDense(nn.Module):
         self.bn2.apply(weights_init)
         self.decoder.apply(weights_init)
         self.conv3.apply(weights_init)
+        if learned_upsample:
+            channels = self.encoder.out_channels // 32
+            self.learned_head = nn.Sequential(
+                nn.Conv2d(channels, channels // 2, 3, padding=1, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channels // 2, 1, 3, padding=1, bias=False),
+            )
+            self.learned_head.apply(weights_init)
+            self.conv3 = None
 
     def forward(self, x):
+        x = self.input_adapter(x)
         x = self.encoder(x)       # B×2048×8×10
         x = self.conv2(x)         # B×1024×8×10
         x = self.bn2(x)
         x = self.decoder(x)       # B×64×128×160
+        if self.learned_upsample:
+            return self.learned_head(F.interpolate(
+                x, size=self.output_size, mode="bilinear", align_corners=True))
         x = self.conv3(x)         # B×1×128×160
         x = self.bilinear(x)      # B×1×228×304
         return x

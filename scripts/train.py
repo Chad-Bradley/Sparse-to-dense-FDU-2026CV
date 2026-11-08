@@ -60,9 +60,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="Sparse-to-Dense 独立复现训练")
     # 数据
     p.add_argument("--data-root", default=d.data_root)
-    p.add_argument("--modality", default=d.modality,
+    p.add_argument("--modality", "-m", default=d.modality,
                    choices=["rgb", "d", "rgbd"])
-    p.add_argument("--num-samples", type=int, default=d.num_samples)
+    p.add_argument("--num-samples", "-s", type=int, default=d.num_samples)
     p.add_argument("--max-depth", type=float, default=d.max_depth)
     p.add_argument("--sparsifier", default=d.sparsifier, choices=["uniform"])
     p.add_argument("--no-rgb-normalize", dest="rgb_normalize",
@@ -71,11 +71,15 @@ def parse_args():
     p.add_argument("--lighting-std", type=float, default=d.lighting_std,
                    help="AlexNet PCA 光照噪声强度，0 = 关闭（默认 0.1）")
     # 模型
-    p.add_argument("--arch", default=d.arch, choices=["resnet18", "resnet50"])
-    p.add_argument("--decoder", default=d.decoder,
+    p.add_argument("--arch", "-a", default=d.arch, choices=["resnet18", "resnet50"])
+    p.add_argument("--decoder", "-d", default=d.decoder,
                    choices=["deconv2", "deconv3", "upconv", "upproj"])
     p.add_argument("--conv1-init", default=d.conv1_init,
                    choices=["random", "copy"])
+    p.add_argument("--learned-upsample", action="store_true", default=d.learned_upsample)
+    p.add_argument("--invalid-mode", default=d.invalid_mode,
+                   choices=["zero", "sentinel", "mask", "sparse"])
+    p.add_argument("--invalid-value", type=float, default=d.invalid_value)
     p.add_argument("--bottleneck-kernel", type=int,
                    default=d.bottleneck_kernel)
     p.add_argument("--no-pretrain", dest="pretrained", action="store_false",
@@ -207,6 +211,9 @@ def main():
         run_name = cfg.run_name or "{}_{}_{}_s{}_{}".format(
             cfg.arch, cfg.decoder, cfg.modality,
             cfg.num_samples, cfg.criterion)
+        if not cfg.run_name:
+            run_name += "_{}{}".format(
+                cfg.invalid_mode, "_learned" if cfg.learned_upsample else "")
         run_dir = Path(cfg.out_dir) / run_name
         if run_dir.exists():
             # 不覆盖旧实验：同名目录存在时追加时间戳
@@ -238,18 +245,10 @@ def main():
     # ------------------------------------------------------------------
     # 模型 / 损失 / 优化器
     # ------------------------------------------------------------------
-    in_channels = IN_CHANNELS[cfg.modality]
     # 恢复时不加载 ImageNet 权重：反正马上会被 checkpoint 覆盖，
     # 还能避免构建阶段联网下载。
-    model = SparseToDense(
-        in_channels=in_channels,
-        arch=cfg.arch,
-        decoder=cfg.decoder,
-        output_size=cfg.output_size,
-        pretrained=(cfg.pretrained and not resume),
-        conv1_init=cfg.conv1_init,
-        bottleneck_kernel=cfg.bottleneck_kernel,
-    ).to(device)
+    model = SparseToDense(**cfg.model_kwargs(
+        pretrained=(cfg.pretrained and not resume))).to(device)
 
     criterion = build_criterion(cfg.criterion).to(device)
     optimizer = torch.optim.SGD(
