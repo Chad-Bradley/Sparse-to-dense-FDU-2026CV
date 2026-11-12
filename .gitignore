@@ -3,7 +3,7 @@ runs/
 results/
 
 # 数据：通常是指向 /root/Test/data 的软链接，不入库
-data/
+
 
 # Python
 __pycache__/
