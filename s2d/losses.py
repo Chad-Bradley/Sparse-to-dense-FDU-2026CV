@@ -1,14 +1,5 @@
 """带无效像素掩码的回归损失。"""
 
-"""说明"""
-"""新增了 BerHu、梯度、法向、对数、尺度不变损失，并扩展了 build_criterion。"""
-"""对应地，需要在scripts/train.py中把 
-p.add_argument("--criterion", default=d.criterion, choices=["l1", "l2", "mse"])
-这一行改为
-p.add_argument("--criterion", default=d.criterion, 
-               choices=["l1", "l2", "mse", "berhu", "gradient", "normal", "log", "scale_inv"])"""
-
-
 from __future__ import annotations
 import torch
 import torch.nn as nn
@@ -82,24 +73,29 @@ class MaskedNormalLoss(nn.Module):
         if not mask.any():
             return pred.sum() * 0.0
 
-        # 计算梯度 (未取绝对值)
-        pred_dx = pred[:, :, :, :-1] - pred[:, :, :, 1:]
-        pred_dy = pred[:, :, :-1, :] - pred[:, :, 1:, :]
+        # 统一截取到内部区域 (H-1, W-1)，防止梯度计算后尺寸不一致
+        pred_inner = pred[:, :, :-1, :-1]
+        target_inner = target[:, :, :-1, :-1]
         
-        target_dx = target[:, :, :, :-1] - target[:, :, :, 1:]
-        target_dy = target[:, :, :-1, :] - target[:, :, 1:, :]
+        # 计算 X 和 Y 方向的梯度 (前向差分)
+        pred_dx = pred_inner - pred[:, :, :-1, 1:]
+        pred_dy = pred_inner - pred[:, :, 1:, :-1]
         
-        # 构建法向量 (N, C, H, W, 3) -> [-dx, -dy, 1]
-        # 注意：这里简化了处理，取内部的 H-1, W-1 区域
-        pred_norm = F.normalize(torch.stack([-pred_dx[:,:,:,:-1], -pred_dy[:,:,:-1,:], torch.ones_like(pred_dx[:,:,:,:-1])], dim=-1), p=2, dim=-1)
-        target_norm = F.normalize(torch.stack([-target_dx[:,:,:,:-1], -target_dy[:,:,:-1,:], torch.ones_like(target_dx[:,:,:,:-1])], dim=-1), p=2, dim=-1)
+        target_dx = target_inner - target[:, :, :-1, 1:]
+        target_dy = target_inner - target[:, :, 1:, :-1]
         
-        # 计算余弦相似度
+        # 构建法向量 (N, C, H-1, W-1, 3) -> [-dx, -dy, 1]
+        pred_norm = F.normalize(torch.stack([-pred_dx, -pred_dy, torch.ones_like(pred_dx)], dim=-1), p=2, dim=-1)
+        target_norm = F.normalize(torch.stack([-target_dx, -target_dy, torch.ones_like(target_dx)], dim=-1), p=2, dim=-1)
+        
+        # 计算余弦相似度 (点积)
         cos_sim = (pred_norm * target_norm).sum(dim=-1)
         loss = 1 - cos_sim
         
-        mask_inner = mask[:, :, :-1, :-1]
+        # 对应的 mask 必须涵盖 X 和 Y 的相邻像素
+        mask_inner = mask[:, :, :-1, :-1] & mask[:, :, :-1, 1:] & mask[:, :, 1:, :-1]
         return _masked_mean(loss, mask_inner)
+
 
 class MaskedLogLoss(nn.Module):
     """对数深度损失"""
@@ -107,10 +103,13 @@ class MaskedLogLoss(nn.Module):
         mask = target > 0
         if not mask.any():
             return pred.sum() * 0.0
-        # 加 eps 避免 log(0)
+        
         eps = 1e-6
-        diff = torch.abs(torch.log(pred + eps) - torch.log(target + eps))
+        # 核心修复：确保 pred 在取对数前大于 0，防止 nan
+        safe_pred = F.relu(pred) + eps 
+        diff = torch.abs(torch.log(safe_pred) - torch.log(target))
         return _masked_mean(diff, mask)
+
 
 class MaskedScaleInvariantLoss(nn.Module):
     """尺度不变损失 (Scale-Invariant)"""
@@ -118,12 +117,18 @@ class MaskedScaleInvariantLoss(nn.Module):
         mask = target > 0
         if not mask.any():
             return pred.sum() * 0.0
+        
         eps = 1e-6
+        # 核心修复：确保 pred 在取对数前大于 0，防止 nan
+        safe_pred = F.relu(pred) + eps
+        
         # 只对有效像素计算 log 差值
-        d = torch.log(pred[mask] + eps) - torch.log(target[mask] + eps)
+        d = torch.log(safe_pred[mask]) - torch.log(target[mask])
         n = d.numel()
         loss = (d ** 2).mean() - 0.5 * (d.mean() ** 2)
-        return loss
+        
+        # 理论上 loss 可能因为浮点误差略微小于 0，约束一下
+        return torch.clamp(loss, min=0.0)
 
 def build_criterion(name):
     name = name.lower()

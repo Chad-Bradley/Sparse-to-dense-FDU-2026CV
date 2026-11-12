@@ -11,9 +11,6 @@
 3. 所有算子同时支持 (H, W) 深度图和 (H, W, 3) RGB，靠 ndim 区分。
 """
 
-"""在末尾增加了平移。"""
-
-
 from __future__ import annotations
 
 import cv2
