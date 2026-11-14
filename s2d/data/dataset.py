@@ -79,7 +79,7 @@ class NYUDataset(Dataset):
     def __init__(self, root, split, modality="rgbd", num_samples=500,
                  max_depth=-1.0, sparsifier="uniform",
                  output_size=(228, 304), augment=None,
-                 rgb_normalize=True, lighting_std=0.1):
+                 rgb_normalize=True, lighting_std=0.1, val_sampling_seed=0):
         assert split in ("train", "val"), "split 只能是 train/val"
         assert modality in ("rgb", "d", "rgbd"), \
             "modality 只能是 rgb/d/rgbd"
@@ -87,6 +87,7 @@ class NYUDataset(Dataset):
         self.root = root
         self.split = split
         self.modality = modality
+        self.val_sampling_seed = int(val_sampling_seed)
         self.output_size = (int(output_size[0]), int(output_size[1]))
         self.files = find_h5_files(root)
         if not self.files:
@@ -179,11 +180,21 @@ class NYUDataset(Dataset):
 
         # 4) 稀疏化：在增广后的 GT 上采样，保证输入和标签严格对应
         if self.sparsifier is not None:
-            mask = self.sparsifier(depth)
+            if self.split == "val":
+                # Same observations for every model, epoch and worker count;
+                # do not consume the training augmentation random stream.
+                state = np.random.get_state()
+                try:
+                    np.random.seed((self.val_sampling_seed + index) % (2 ** 32))
+                    mask = self.sparsifier(depth)
+                finally:
+                    np.random.set_state(state)
+            else:
+                mask = self.sparsifier(depth)
             sparse = np.zeros_like(depth)
             sparse[mask] = depth[mask]
         else:
-            sparse = None
+            sparse = np.zeros_like(depth)
 
         # 5) 按模态拼通道
         if self.modality == "rgb":

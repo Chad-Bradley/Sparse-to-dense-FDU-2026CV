@@ -1,0 +1,7 @@
+# Install a matching torch/torchvision pair separately for your CPU/CUDA platform.
+# Verified: Python 3.10, torch 2.1.0+cu121, torchvision 0.16.0+cu121.
+numpy>=1.24,<2
+h5py>=3.8,<4
+opencv-python>=4.8,<4.12
+Pillow>=9.5,<12
+matplotlib>=3.7,<3.11

@@ -42,27 +42,27 @@ from s2d.config import Config
 from s2d.data.dataset import NYUDataset
 from s2d.engine import evaluate, train_one_epoch
 from s2d.losses import build_criterion
-from s2d.models.sparse2dense import SparseToDense
+from s2d.models.factory import build_model
+from s2d.training import (stage_for_epoch, stage_lr, make_optimizer,
+                          initialize_weights, capture_rng, restore_rng)
 from s2d.utils import save_json, set_seed, worker_init_fn
 
-IN_CHANNELS = {"rgb": 3, "d": 1, "rgbd": 4}
-
 CSV_FIELDS = [
-    "epoch", "lr",
+    "epoch", "lr", "stage", "epoch_seconds",
     "train_loss", "train_rmse", "train_absrel",
     "val_rmse", "val_absrel", "val_mae", "val_lg10",
     "val_delta1", "val_delta2", "val_delta3",
 ]
 
 
-def parse_args():
+def parse_args(argv=None):
     d = Config()
     p = argparse.ArgumentParser(description="Sparse-to-Dense 独立复现训练")
     # 数据
     p.add_argument("--data-root", default=d.data_root)
-    p.add_argument("--modality", default=d.modality,
+    p.add_argument("-m", "--modality", default=d.modality,
                    choices=["rgb", "d", "rgbd"])
-    p.add_argument("--num-samples", type=int, default=d.num_samples)
+    p.add_argument("-s", "--num-samples", type=int, default=d.num_samples)
     p.add_argument("--max-depth", type=float, default=d.max_depth)
     p.add_argument("--sparsifier", default=d.sparsifier, choices=["uniform"])
     p.add_argument("--no-rgb-normalize", dest="rgb_normalize",
@@ -71,8 +71,8 @@ def parse_args():
     p.add_argument("--lighting-std", type=float, default=d.lighting_std,
                    help="AlexNet PCA 光照噪声强度，0 = 关闭（默认 0.1）")
     # 模型
-    p.add_argument("--arch", default=d.arch, choices=["resnet18", "resnet50"])
-    p.add_argument("--decoder", default=d.decoder,
+    p.add_argument("-a", "--arch", default=d.arch, choices=["resnet18", "resnet50"])
+    p.add_argument("-d", "--decoder", default=d.decoder,
                    choices=["deconv2", "deconv3", "upconv", "upproj"])
     p.add_argument("--conv1-init", default=d.conv1_init,
                    choices=["random", "copy"])
@@ -80,22 +80,34 @@ def parse_args():
                    default=d.bottleneck_kernel)
     p.add_argument("--no-pretrain", dest="pretrained", action="store_false",
                    default=d.pretrained, help="不加载 ImageNet 权重")
+    p.add_argument("--multiscale", choices=["none", "aspp"], default=d.multiscale)
+    p.add_argument("--unet-skips", action="store_true", default=d.unet_skips)
+    p.add_argument("--refiner", choices=["none", "cspn-lite"], default=d.refiner)
+    p.add_argument("--prop-kernel", type=int, default=d.prop_kernel)
+    p.add_argument("--prop-steps", type=int, default=d.prop_steps)
+    p.add_argument("--no-preserve-sparse", dest="preserve_sparse", action="store_false",
+                   default=d.preserve_sparse)
     # 优化
     p.add_argument("--epochs", type=int, default=d.epochs)
-    p.add_argument("--batch-size", type=int, default=d.batch_size)
+    p.add_argument("-b", "--batch-size", type=int, default=d.batch_size)
     p.add_argument("--eval-batch-size", type=int, default=d.eval_batch_size)
     p.add_argument("--lr", type=float, default=d.lr)
     p.add_argument("--momentum", type=float, default=d.momentum)
     p.add_argument("--weight-decay", type=float, default=d.weight_decay)
     p.add_argument("--lr-step", type=int, default=d.lr_step)
     p.add_argument("--lr-gamma", type=float, default=d.lr_gamma)
-    p.add_argument("--criterion", default=d.criterion,
+    p.add_argument("-c", "--criterion", default=d.criterion,
                    choices=["l1", "l2", "mse"])
     p.add_argument("--metric-reduction", default=d.metric_reduction,
                    choices=["image", "pixel"],
                    help="image = 原版按图平均（默认）；pixel = 按像素累计")
     p.add_argument("--workers", type=int, default=d.workers)
     p.add_argument("--seed", type=int, default=d.seed)
+    p.add_argument("--val-sampling-seed", type=int, default=d.val_sampling_seed)
+    p.add_argument("--init-checkpoint", default=d.init_checkpoint, metavar="PATH")
+    p.add_argument("--refiner-only-epochs", type=int, default=d.refiner_only_epochs)
+    p.add_argument("--refiner-lr", type=float, default=d.refiner_lr)
+    p.add_argument("--joint-lr", type=float, default=d.joint_lr)
     # 输出
     p.add_argument("--out-dir", default=d.out_dir)
     p.add_argument("--run-name", default=d.run_name)
@@ -108,7 +120,12 @@ def parse_args():
                    help="只用前 N 张验证图（0 = 全部，试跑用）")
     # 恢复
     p.add_argument("--resume", default="", metavar="PATH")
-    return p.parse_args()
+    args = p.parse_args(argv)
+    if args.resume and args.init_checkpoint:
+        p.error("--resume and --init-checkpoint are mutually exclusive")
+    if not args.resume and args.refiner != "none" and args.refiner_only_epochs > 0 and not args.init_checkpoint:
+        p.error("Frozen refinement requires --init-checkpoint; use --refiner-only-epochs 0 to train jointly from scratch")
+    return args
 
 
 def adjust_lr(optimizer, epoch, base_lr, step, gamma):
@@ -134,6 +151,7 @@ def build_loaders(cfg, limit_train=0, limit_val=0):
         output_size=cfg.output_size,
         rgb_normalize=cfg.rgb_normalize,
         lighting_std=cfg.lighting_std,
+        val_sampling_seed=cfg.val_sampling_seed,
     )
     train_ds = NYUDataset(os.path.join(cfg.data_root, "train"),
                           split="train", **common)
@@ -149,7 +167,8 @@ def build_loaders(cfg, limit_train=0, limit_val=0):
     train_loader = DataLoader(
         train_ds, batch_size=cfg.batch_size, shuffle=True,
         num_workers=cfg.workers, pin_memory=True,
-        worker_init_fn=worker_init_fn, drop_last=False)
+        worker_init_fn=worker_init_fn, drop_last=False,
+        generator=torch.Generator().manual_seed(cfg.seed))
     val_loader = DataLoader(
         val_ds, batch_size=cfg.eval_batch_size, shuffle=False,
         num_workers=cfg.workers, pin_memory=True,
@@ -157,20 +176,27 @@ def build_loaders(cfg, limit_train=0, limit_val=0):
     return train_ds, train_loader, val_ds, val_loader
 
 
-def save_checkpoint(path, model, optimizer, epoch, best_rmse, cfg):
+def save_checkpoint(path, model, optimizer, epoch, best_rmse, cfg,
+                    loader=None, stage_best_rmse=None):
     torch.save({
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "epoch": epoch,                 # 0-based
         "best_rmse": best_rmse,
         "config": cfg.to_dict(),        # dict，不是 argparse Namespace
+        "stage": stage_for_epoch(cfg, epoch),
+        "stage_best_rmse": stage_best_rmse,
+        "rng": capture_rng(loader),
     }, path)
 
 
 def append_csv(path, row, fields):
     write_header = not path.exists()
+    if not write_header:
+        with open(path, newline="", encoding="utf-8") as existing:
+            fields = next(csv.reader(existing))
     with open(path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         writer.writerow(row)
@@ -207,12 +233,15 @@ def main():
         run_name = cfg.run_name or "{}_{}_{}_s{}_{}".format(
             cfg.arch, cfg.decoder, cfg.modality,
             cfg.num_samples, cfg.criterion)
+        if not cfg.run_name:
+            run_name += "_ms-{}_skip-{}_ref-{}_k{}_t{}".format(
+                cfg.multiscale, int(cfg.unet_skips), cfg.refiner, cfg.prop_kernel, cfg.prop_steps)
         run_dir = Path(cfg.out_dir) / run_name
         if run_dir.exists():
             # 不覆盖旧实验：同名目录存在时追加时间戳
             run_dir = Path(cfg.out_dir) / (
                 run_name + "_" + time.strftime("%Y%m%d-%H%M%S"))
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir.mkdir(parents=True, exist_ok=False)
         save_json(cfg.to_dict(), run_dir / "config.json")
         start_epoch = 0
         best_rmse = float("inf")
@@ -238,38 +267,49 @@ def main():
     # ------------------------------------------------------------------
     # 模型 / 损失 / 优化器
     # ------------------------------------------------------------------
-    in_channels = IN_CHANNELS[cfg.modality]
     # 恢复时不加载 ImageNet 权重：反正马上会被 checkpoint 覆盖，
     # 还能避免构建阶段联网下载。
-    model = SparseToDense(
-        in_channels=in_channels,
-        arch=cfg.arch,
-        decoder=cfg.decoder,
-        output_size=cfg.output_size,
-        pretrained=(cfg.pretrained and not resume),
-        conv1_init=cfg.conv1_init,
-        bottleneck_kernel=cfg.bottleneck_kernel,
-    ).to(device)
+    model = build_model(cfg, pretrained=(cfg.pretrained and not resume and not cfg.init_checkpoint)).to(device)
 
     criterion = build_criterion(cfg.criterion).to(device)
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=cfg.lr,
-        momentum=cfg.momentum, weight_decay=cfg.weight_decay)
-
+    stage_epoch = int(ckpt["epoch"]) if resume else 0
+    optimizer = make_optimizer(model, cfg, stage_epoch)
     if resume:
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
+        restore_rng(ckpt.get("rng"), train_loader)
+    elif cfg.init_checkpoint:
+        initial = torch.load(cfg.init_checkpoint, map_location="cpu", weights_only=False)
+        report = initialize_weights(model, cfg, initial)
+        print("=> Initialization: {}".format(report))
+        save_json(report, run_dir / "initialization.json")
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print("=> 模型: {} + {}  {:.1f}M 参数".format(
         cfg.arch, cfg.decoder, n_params))
+    if not resume:
+        save_json({"parameters": sum(p.numel() for p in model.parameters()),
+                   "initialization": cfg.init_checkpoint or "imagenet/random",
+                   "limit_train": limit_train, "limit_val": limit_val}, run_dir / "experiment.json")
 
     # ------------------------------------------------------------------
     # 训练
     # ------------------------------------------------------------------
     csv_path = run_dir / "metrics.csv"
+    previous_stage = stage_for_epoch(cfg, stage_epoch)
+    stage_best = ckpt.get("stage_best_rmse") if resume else None
+    if stage_best is None:
+        stage_best = float("inf")
     for epoch in range(start_epoch, cfg.epochs):
-        lr = adjust_lr(optimizer, epoch, cfg.lr, cfg.lr_step, cfg.lr_gamma)
+        stage = stage_for_epoch(cfg, epoch)
+        if stage != previous_stage:
+            optimizer = make_optimizer(model, cfg, epoch)
+            previous_stage = stage
+            stage_best = float("inf")
+        lr = stage_lr(cfg, epoch)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+        print("=> Stage: {}".format(stage))
         print("\n=> Epoch {}/{}  lr {:.2e}".format(
             epoch + 1, cfg.epochs, lr))
 
@@ -286,10 +326,14 @@ def main():
         is_best = val_m["rmse"] < best_rmse
         if is_best:
             best_rmse = val_m["rmse"]
+        is_stage_best = val_m["rmse"] < stage_best
+        stage_best = min(stage_best, val_m["rmse"])
 
         append_csv(csv_path, {
             "epoch": epoch + 1,
             "lr": lr,
+            "stage": stage,
+            "epoch_seconds": elapsed,
             "train_loss": train_m["loss"],
             "train_rmse": train_m["rmse"],
             "train_absrel": train_m["absrel"],
@@ -303,10 +347,13 @@ def main():
         }, CSV_FIELDS)
 
         save_checkpoint(run_dir / "last.pth.tar", model, optimizer,
-                        epoch, best_rmse, cfg)
+                        epoch, best_rmse, cfg, train_loader, stage_best)
         if is_best:
             save_checkpoint(run_dir / "best.pth.tar", model, optimizer,
-                            epoch, best_rmse, cfg)
+                            epoch, best_rmse, cfg, train_loader, stage_best)
+        if is_stage_best:
+            save_checkpoint(run_dir / (stage + "_best.pth.tar"), model, optimizer,
+                            epoch, best_rmse, cfg, train_loader, stage_best)
 
         print("   train loss {:.4f}  rmse {:.4f}  absrel {:.4f}".format(
             train_m["loss"], train_m["rmse"], train_m["absrel"]))

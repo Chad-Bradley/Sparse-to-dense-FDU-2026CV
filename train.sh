@@ -5,7 +5,7 @@
 #   ResNet50 + upproj + rgbd + 500 点
 #   ImageNet 归一化 + Lighting，15 epoch，batch 8，lr 0.01（每 5 epoch ×0.1）
 #
-# 不做任何改进开关（A1–A4 / B1–B2 都不在这个目录里）。
+# 默认关闭结构改进；可用环境变量或末尾 CLI 参数开启。
 #
 # 用法（在 s2d_baseline 目录或任意目录）：
 #
@@ -56,6 +56,17 @@ TORCH_HOME="${TORCH_HOME:-/root/Test/hf_cache}"
 S2D_RUNS="${S2D_RUNS:-/root/Test/s2d_baseline_runs}"
 RUN_NAME="${RUN_NAME:-}"
 RESUME="${RESUME:-}"
+MULTISCALE="${MULTISCALE:-none}"
+UNET_SKIPS="${UNET_SKIPS:-0}"
+REFINER="${REFINER:-none}"
+PROP_KERNEL="${PROP_KERNEL:-3}"
+PROP_STEPS="${PROP_STEPS:-3}"
+PRESERVE_SPARSE="${PRESERVE_SPARSE:-1}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+REFINER_ONLY_EPOCHS="${REFINER_ONLY_EPOCHS:-3}"
+REFINER_LR="${REFINER_LR:-0.001}"
+JOINT_LR="${JOINT_LR:-0.0001}"
+VAL_SAMPLING_SEED="${VAL_SAMPLING_SEED:-0}"
 LIMIT_TRAIN="${LIMIT_TRAIN:-0}"
 LIMIT_VAL="${LIMIT_VAL:-0}"
 PRINT_FREQ="${PRINT_FREQ:-50}"
@@ -128,6 +139,14 @@ CMD=(python -u -m scripts.train
      --metric-reduction "$METRIC"
      --workers "$WORKERS"
      --seed "$SEED"
+     --val-sampling-seed "$VAL_SAMPLING_SEED"
+     --multiscale "$MULTISCALE"
+     --refiner "$REFINER"
+     --prop-kernel "$PROP_KERNEL"
+     --prop-steps "$PROP_STEPS"
+     --refiner-only-epochs "$REFINER_ONLY_EPOCHS"
+     --refiner-lr "$REFINER_LR"
+     --joint-lr "$JOINT_LR"
      --print-freq "$PRINT_FREQ"
      --out-dir "$S2D_RUNS")
 
@@ -139,6 +158,15 @@ if [[ -n "$RUN_NAME" ]]; then
 fi
 if [[ -n "$RESUME" ]]; then
     CMD+=(--resume "$RESUME")
+fi
+if [[ -n "$INIT_CHECKPOINT" ]]; then
+    CMD+=(--init-checkpoint "$INIT_CHECKPOINT")
+fi
+if [[ "$UNET_SKIPS" == "1" ]]; then
+    CMD+=(--unet-skips)
+fi
+if [[ "$PRESERVE_SPARSE" == "0" ]]; then
+    CMD+=(--no-preserve-sparse)
 fi
 if [[ "$LIMIT_TRAIN" -gt 0 ]]; then
     CMD+=(--limit-train "$LIMIT_TRAIN")

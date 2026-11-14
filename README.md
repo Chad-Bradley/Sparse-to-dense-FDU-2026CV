@@ -1,5 +1,8 @@
 # s2d_baseline
 
+网络结构改进（多尺度 / U-Net / CSPN-lite）、分阶段训练与消融实验见
+[NETWORK_ABLATIONS.md](NETWORK_ABLATIONS.md)。默认关闭所有结构改进，兼容原模型权重。
+
 ## 目录结构
 
 ```

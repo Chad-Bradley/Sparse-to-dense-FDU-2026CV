@@ -29,7 +29,7 @@ from s2d.config import Config
 from s2d.data.dataset import NYUDataset
 from s2d.data.transforms import IMAGENET_MEAN, IMAGENET_STD
 from s2d.metrics import MetricAccumulator
-from s2d.models.sparse2dense import SparseToDense
+from s2d.models.factory import build_model
 from s2d.utils import save_json
 from s2d.viz import make_error_map, make_panel, save_panel
 
@@ -48,6 +48,8 @@ def parse_args():
                    help="保存多少张四联图，0 = 不保存")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--prediction", choices=["refined", "coarse"], default="refined",
+                   help="Evaluate refinement or the same checkpoint's coarse output")
     return p.parse_args()
 
 
@@ -75,7 +77,8 @@ def main():
     data_root = args.data_root or cfg.data_root
 
     out_dir = (Path(args.output_dir) if args.output_dir
-               else Path(args.checkpoint).resolve().parent / "eval")
+               else Path(args.checkpoint).resolve().parent / (
+                   "eval" if args.prediction == "refined" else "eval_coarse"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device(args.device)
@@ -84,18 +87,13 @@ def main():
         modality=cfg.modality, num_samples=cfg.num_samples,
         max_depth=cfg.max_depth, sparsifier=cfg.sparsifier,
         output_size=cfg.output_size,
-        rgb_normalize=cfg.rgb_normalize, lighting_std=cfg.lighting_std)
+        rgb_normalize=cfg.rgb_normalize, lighting_std=cfg.lighting_std,
+        val_sampling_seed=cfg.val_sampling_seed)
     # batch 固定 1：方便逐张取 RGB/稀疏图，和上游验证设置也一致
     loader = DataLoader(dataset, batch_size=1, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
-    model = SparseToDense(
-        in_channels=IN_CHANNELS[cfg.modality],
-        arch=cfg.arch, decoder=cfg.decoder,
-        output_size=cfg.output_size,
-        pretrained=False,               # 权重马上从 checkpoint 加载
-        conv1_init=cfg.conv1_init,
-        bottleneck_kernel=cfg.bottleneck_kernel).to(device)
+    model = build_model(cfg).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
@@ -114,7 +112,7 @@ def main():
         for inp, tgt in loader:
             inp = inp.to(device, non_blocking=True)
             tgt = tgt.to(device, non_blocking=True)
-            pred = model(inp)
+            pred = model.forward_outputs(inp)[args.prediction]
             acc_img.update(pred, tgt)
             acc_pix.update(pred, tgt)
 

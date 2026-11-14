@@ -35,7 +35,7 @@ class TestDecoders(unittest.TestCase):
             with self.subTest(decoder=name):
                 decoder = choose_decoder(name, 64)
                 y = decoder(x)
-                self.assertEqual(tuple(y.shape), (1, 4, 32, 40),
+                self.assertEqual(tuple(y.shape), (1, 4, 32, 32),
                                  "{} 输出形状不对".format(name))
 
     def test_unknown_decoder(self):

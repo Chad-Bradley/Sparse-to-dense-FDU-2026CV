@@ -59,6 +59,12 @@ class Config:
     # 上游的瓶颈卷积是 1×1、2048→1024、后接 BN 且不加 ReLU。
     bottleneck_kernel: int = 1
     pretrained: bool = True
+    multiscale: str = "none"
+    unet_skips: bool = False
+    refiner: str = "none"
+    prop_kernel: int = 3
+    prop_steps: int = 3
+    preserve_sparse: bool = True
 
     # --- 优化 ---
     epochs: int = 15
@@ -77,6 +83,11 @@ class Config:
     metric_reduction: str = "image"
     workers: int = 10
     seed: int = 0
+    val_sampling_seed: int = 0
+    init_checkpoint: str = ""
+    refiner_only_epochs: int = 3
+    refiner_lr: float = 1e-3
+    joint_lr: float = 1e-4
 
     # --- 输出 ---
     out_dir: str = str(DEFAULT_RUNS_DIR)
@@ -85,6 +96,20 @@ class Config:
     save_samples: int = 8
 
     def __post_init__(self):
+        if self.multiscale not in ("none", "aspp"):
+            raise ValueError("multiscale must be none/aspp")
+        if self.refiner not in ("none", "cspn-lite"):
+            raise ValueError("refiner must be none/cspn-lite")
+        if self.unet_skips and self.decoder != "upproj":
+            raise ValueError("U-Net skips require decoder=upproj")
+        if self.prop_kernel < 3 or self.prop_kernel % 2 == 0 or self.prop_steps < 1:
+            raise ValueError("Propagation needs an odd kernel >= 3 and positive steps")
+        if self.refiner_only_epochs < 0 or self.epochs < 1 or self.lr_step < 1:
+            raise ValueError("Invalid epoch/scheduler settings")
+        if min(self.lr, self.refiner_lr, self.joint_lr) <= 0:
+            raise ValueError("Learning rates must be positive")
+        if self.val_sampling_seed < 0:
+            raise ValueError("val_sampling_seed must be nonnegative")
         # JSON 反序列化会把 tuple 变成 list；统一转回 tuple，便于比较和传给模型。
         if not isinstance(self.output_size, tuple):
             self.output_size = tuple(self.output_size)

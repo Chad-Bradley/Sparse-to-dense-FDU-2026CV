@@ -36,7 +36,7 @@ from s2d.analysis import (
 from s2d.config import Config
 from s2d.data.dataset import NYUDataset
 from s2d.data.transforms import IMAGENET_MEAN, IMAGENET_STD
-from s2d.models.sparse2dense import SparseToDense
+from s2d.models.factory import build_model
 
 IN_CHANNELS = {"rgb": 3, "d": 1, "rgbd": 4}
 
@@ -90,16 +90,12 @@ def main():
         modality=cfg.modality, num_samples=cfg.num_samples,
         max_depth=cfg.max_depth, sparsifier=cfg.sparsifier,
         output_size=cfg.output_size,
-        rgb_normalize=cfg.rgb_normalize, lighting_std=cfg.lighting_std)
+        rgb_normalize=cfg.rgb_normalize, lighting_std=cfg.lighting_std,
+        val_sampling_seed=cfg.val_sampling_seed)
     loader = DataLoader(dataset, batch_size=1, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
-    model = SparseToDense(
-        in_channels=IN_CHANNELS[cfg.modality],
-        arch=cfg.arch, decoder=cfg.decoder,
-        output_size=cfg.output_size, pretrained=False,
-        conv1_init=cfg.conv1_init,
-        bottleneck_kernel=cfg.bottleneck_kernel).to(device)
+    model = build_model(cfg).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 

@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from s2d.models.decoder import choose_decoder
 from s2d.models.encoder import ResNetEncoder, weights_init
+from s2d.models.enhancements import MultiScaleContext, SkipFusion, CSPNLite
 
 
 class SparseToDense(nn.Module):
@@ -37,8 +38,16 @@ class SparseToDense(nn.Module):
 
     def __init__(self, in_channels=4, arch="resnet50", decoder="upproj",
                  output_size=(228, 304), pretrained=True,
-                 conv1_init="random", bottleneck_kernel=1):
+                 conv1_init="random", bottleneck_kernel=1,
+                 multiscale="none", unet_skips=False, refiner="none",
+                 prop_kernel=3, prop_steps=3, preserve_sparse=True):
         super().__init__()
+        if multiscale not in ("none", "aspp") or refiner not in ("none", "cspn-lite"):
+            raise ValueError("Unknown multiscale/refiner option")
+        if unet_skips and decoder != "upproj":
+            raise ValueError("U-Net skips currently require decoder=upproj")
+        self.in_channels = in_channels
+        self._backbone_frozen = False
         self.output_size = tuple(output_size)
         self.encoder = ResNetEncoder(
             arch=arch, in_channels=in_channels,
@@ -74,7 +83,61 @@ class SparseToDense(nn.Module):
         self.decoder.apply(weights_init)
         self.conv3.apply(weights_init)
 
+        self.context = MultiScaleContext(mid_channels) if multiscale == "aspp" else None
+        self.skip_fusions = (nn.ModuleList([
+            SkipFusion(skip_ch, mid_channels // (2 ** (i + 1)))
+            for i, skip_ch in enumerate(reversed(self.encoder.feature_channels[:-1]))
+        ]) if unet_skips else None)
+        self.refiner = (CSPNLite(self.encoder.out_channels // 32, prop_kernel,
+                                 prop_steps, preserve_sparse)
+                        if refiner == "cspn-lite" else None)
+        for module in (self.context, self.skip_fusions, self.refiner):
+            if module is not None:
+                module.apply(weights_init)
+        if self.refiner is not None:
+            self.refiner.reset_affinity()
+
+    def set_backbone_frozen(self, frozen):
+        if frozen and self.refiner is None:
+            raise ValueError("Cannot freeze backbone without a refiner")
+        self._backbone_frozen = frozen
+        for name, parameter in self.named_parameters():
+            parameter.requires_grad_(not frozen or name.startswith("refiner."))
+        self.train(self.training)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and self._backbone_frozen:
+            for name, child in self.named_children():
+                if name != "refiner":
+                    child.eval()
+        return self
+
+    def forward_outputs(self, x):
+        """Explicit analysis API; normal forward still returns a tensor."""
+        inp = x
+        skips = None
+        if self.skip_fusions is not None:
+            features = self.encoder.forward_features(x)
+            x, skips = features[-1], tuple(reversed(features[:-1]))
+        else:
+            x = self.encoder(x)
+        x = self.bn2(self.conv2(x))
+        if self.context is not None:
+            x = self.context(x)
+        if skips is None:
+            x = self.decoder(x)
+        else:
+            for block, fusion, skip in zip(self.decoder.blocks, self.skip_fusions, skips):
+                x = fusion(block(x), skip)
+        coarse = self.bilinear(self.conv3(x))
+        sparse = inp[:, 3:4] if self.in_channels == 4 else (inp if self.in_channels == 1 else None)
+        refined = self.refiner(coarse, x, sparse) if self.refiner is not None else coarse
+        return {"coarse": coarse, "refined": refined}
+
     def forward(self, x):
+        if self.context is not None or self.skip_fusions is not None or self.refiner is not None:
+            return self.forward_outputs(x)["refined"]
         x = self.encoder(x)       # B×2048×8×10
         x = self.conv2(x)         # B×1024×8×10
         x = self.bn2(x)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import torch
 import torch.nn as nn
 import torchvision
 from torchvision.models import ResNet18_Weights, ResNet50_Weights
@@ -97,6 +98,17 @@ class ResNetEncoder(nn.Module):
         self.layer4 = net.layer4
 
         self.out_channels = 2048 if arch == "resnet50" else 512
+        self.feature_channels = ((64, 256, 512, 1024, 2048)
+                                 if arch == "resnet50" else (64, 64, 128, 256, 512))
+
+    def forward_features(self, x):
+        """Return stem, layer1..4 without changing the legacy forward API."""
+        stem = self.relu(self.bn1(self.conv1(x)))
+        layer1 = self.layer1(self.maxpool(stem))
+        layer2 = self.layer2(layer1)
+        layer3 = self.layer3(layer2)
+        layer4 = self.layer4(layer3)
+        return stem, layer1, layer2, layer3, layer4
 
     def forward(self, x):
         # 尺寸（输入 228×304）：
